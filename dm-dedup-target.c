@@ -562,12 +562,15 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 		bio = new_bio;
 	}
 
+    // get lbn
 	lbn = bio_lbn(dc, bio);
 
+    // compute FP
 	r = compute_hash_bio(dc->desc_table, bio, hash);
 	if (r)
 		return r;
 
+    // check if FP exists
 	r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
 					 dc->crypto_key_size,
 					 &hashpbn_value, &vsize);
