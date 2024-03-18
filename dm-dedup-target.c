@@ -94,6 +94,17 @@ static void do_io(struct dedup_config *dc, struct bio *bio, uint64_t pbn)
 	do_io_remap_device(dc, bio);
 }
 
+
+__u64 get_data_addr_of_bio(struct bio *bio) {
+    struct bio_vec *bv = &bio->bi_io_vec[0];
+    if (!bio || bio->bi_vcnt == 0 || !bio->bi_io_vec)
+        return 0;
+
+    bv = &bio->bi_io_vec[0];
+    unsigned long data_address = (unsigned long) page_address(bv->bv_page) + bv->bv_offset;
+    return (__u64) data_address;
+}
+
 /*
  * Gets the pbn from the LBN->PBN entry and performs io request.
  * If corruption check is enabled, it prepares the check_io
@@ -106,70 +117,37 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 {
 	u64 lbn;
 	u32 vsize;
-	struct lbn_pbn_value lbnpbn_value;
-	struct check_io *io;
-	struct bio *clone;
+	struct lbn_fp_value lbn_fp_value;
+	struct nvme_passthru_kv_cmd nvme_pth_kv_cmd;
+	enum nvme_opcode op;
 	int r;
 
 	lbn = bio_lbn(dc, bio);
 
-	/* get the pbn in LBN->PBN store for incoming lbn */
-	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
-			sizeof(lbn), (void *)&lbnpbn_value, &vsize);
-
+	r = dc->kvs_lbn_fp->kvs_lookup(dc->kvs_lbn_fp, (void *)lbn,
+			sizeof(lbn), (void *)&lbn_fp_value, &vsize);
 	if (r == -ENODATA) {
-		/* unable to find the entry in LBN->PBN store */
 		bio_zero_endio(bio);
-	} else if (r == 0) {
-		/* entry found in the LBN->PBN store */
-
-		/* if corruption check not enabled directly do io request */
-		if (!dc->check_corruption) {
-			clone = bio;
-			goto read_no_fec;
-		}
-
-		/* Prepare check_io structure to be later used for FEC */
-		io = kmalloc(sizeof(struct check_io), GFP_NOIO);
-		io->dc = dc;
-		io->pbn = lbnpbn_value.pbn;
-		io->lbn = lbn;
-		io->base_bio = bio;
-
-		/*
-		 * Prepare bio clone to handle disk read
-		 * clone is created so that we can have our own endio
-		 * where we call bio_endio on original bio
-		 * after corruption checks are done
-		 */
-		clone = bio_clone_fast(bio, GFP_NOIO, &dc->bs);
-		if (!clone) {
-			r = -ENOMEM;
-			goto out_clone_fail;
-		}
-
-		/*
-		 * Store the check_io structure in bio's private field
-		 * used as indirect argument when disk read is finished
-		 */
-		clone->bi_end_io = dedup_check_endio;
-		clone->bi_private = io;
-
-read_no_fec:
-		do_io(dc, clone, lbnpbn_value.pbn);
-	} else {
-		goto out;
 	}
 
-	r = 0;
-	goto out;
+	op = nvme_cmd_kv_retrieve;
+	nvme_pth_kv_cmd.opcode = op; // opcode
+	nvme_pth_kv_cmd.flags = 0;
+	nvme_pth_kv_cmd.rsvd1 = 0;
+	nvme_pth_kv_cmd.nsid = 1;
+	nvme_pth_kv_cmd.cdw2 = (uint32_t) ((uint32_t)dc & 0xFFFFFFFF); //dc
+	nvme_pth_kv_cmd.cdw3 = (uint32_t) ((uint32_t)(dc >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw4 = (uint32_t) ((uint32_t)bio & 0xFFFFFFFF); //bio
+	nvme_pth_kv_cmd.cdw5 = (uint32_t) ((uint32_t)(bio >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
+	nvme_pth_kv_cmd.data_len = 4096; // data_len
+	nvme_pth_kv_cmd.key_len = 16; // key_len
+	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
 
-out_clone_fail:
-	kfree(io);
+	// ioctl
+	bio->bi_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)&nvme_pth_kv_cmd);
 
-out:
-	return r;
-
+	return 0;
 }
 
 /*
@@ -543,9 +521,11 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 {
 	u64 lbn;
 	u8 hash[MAX_DIGEST_SIZE];
-	struct hash_pbn_value hashpbn_value;
+	struct lbn_fp_value lbn_fp_value;
 	u32 vsize;
 	struct bio *new_bio = NULL;
+	struct nvme_passthru_kv_cmd nvme_pth_kv_cmd;
+	enum nvme_opcode op;
 	int r;
 
 	/* If there is a data corruption make the device read-only */
@@ -571,19 +551,24 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r)
 		return r;
 
-    // check if FP exists
-	r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
-					 dc->crypto_key_size,
-					 &hashpbn_value, &vsize);
+	// put(FP, data)
+	op = nvme_cmd_kv_store;
+	nvme_pth_kv_cmd.opcode = op; // opcode
+	nvme_pth_kv_cmd.flags = 0;
+	nvme_pth_kv_cmd.rsvd1 = 0;
+	nvme_pth_kv_cmd.nsid = 1;
+	nvme_pth_kv_cmd.cdw2 = (uint32_t) ((uint32_t)dc & 0xFFFFFFFF); //dc
+	nvme_pth_kv_cmd.cdw3 = (uint32_t) ((uint32_t)(dc >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw4 = (uint32_t) ((uint32_t)bio & 0xFFFFFFFF); //bio
+	nvme_pth_kv_cmd.cdw5 = (uint32_t) ((uint32_t)(bio >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
+	nvme_pth_kv_cmd.data_len = 4096; // data_len
+	nvme_pth_kv_cmd.key_len = 16; // key_len
+	memcpy(nvme_pth_kv_cmd.key, hash, 16); // key
+	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
 
-	if (r == -ENODATA)
-		r = handle_write_no_hash(dc, bio, lbn, hash);
-	else if (r == 0)
-		r = handle_write_with_hash(dc, bio, lbn, hash,
-					   hashpbn_value);
-
-	if (r < 0)
-		return r;
+	// ioctl
+	bio->bi_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)&nvme_pth_kv_cmd);
 
 	dc->writes_after_flush++;
 	if ((dc->flushrq && dc->writes_after_flush >= dc->flushrq) ||
