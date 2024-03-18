@@ -45,4 +45,5 @@ enum nvme_opcode {
 	nvme_cmd_kv_iter_req = 0xB1,
 	nvme_cmd_kv_iter_read = 0xB2,
 	nvme_cmd_kv_exist = 0xB3,
+	nvme_cmd_kv_decrease = 0xB4,
 };
