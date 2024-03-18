@@ -26,6 +26,7 @@
 #include "dm-dedup-cbt.h"
 #include "dm-dedup-kvstore.h"
 #include "dm-dedup-check.h"
+#include "dm-dedup-nvme.h"
 
 #define MAX_DEV_NAME_LEN (64)
 
@@ -1164,6 +1165,15 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (IS_ERR(dc->kvs_lbn_pbn)) {
 		ti->error = "failed to create linear KVS";
 		r = PTR_ERR(dc->kvs_lbn_pbn);
+		goto bad_kvstore_init;
+	}
+
+	// 添加lbn->fp映射表
+	dc->kvs_lbn_fp = dc->mdops->kvs_create_linear(md, 8,
+			sizeof(struct lbn_fp_value), dc->lblocks, unformatted);
+	if (IS_ERR(dc->kvs_lbn_fp)) {
+		ti->error = "fail to create linear KVS";
+		r = PTR_ERR(dc->kvs_lbn_fp);
 		goto bad_kvstore_init;
 	}
 

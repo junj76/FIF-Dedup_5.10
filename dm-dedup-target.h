@@ -46,6 +46,8 @@
 #define CRYPTO_ALG_NAME_LEN     16
 #define MAX_DIGEST_SIZE	SHA256_DIGEST_SIZE
 
+#define MAX_FINGER_PRINT_SIZE 16
+
 #define MAX_BACKEND_NAME_LEN (64)
 
 #define MIN_DEDUP_WORK_IO	16
@@ -92,6 +94,7 @@ struct dedup_config {
 	struct metadata *bmd;
 	struct kvstore *kvs_hash_pbn;
 	struct kvstore *kvs_lbn_pbn;
+	struct kvstore *kvs_lbn_fp;
 
 	char crypto_alg[CRYPTO_ALG_NAME_LEN];
 	int crypto_key_size;
@@ -112,5 +115,11 @@ struct hash_pbn_value {
 struct lbn_pbn_value {
 	u64 pbn;	/* in blocks */
 };
+
+/* Value of the LBN-FP key-value store */
+struct lbn_fp_value {
+	u8 fp[MAX_FINGER_PRINT_SIZE];
+};
+
 
 #endif /* DM_DEDUP_H */
