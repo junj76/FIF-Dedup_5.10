@@ -124,7 +124,7 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 
 	lbn = bio_lbn(dc, bio);
 
-	r = dc->kvs_lbn_fp->kvs_lookup(dc->kvs_lbn_fp, (void *)lbn,
+	r = dc->kvs_lbn_fp->kvs_lookup(dc->kvs_lbn_fp, (void *)&lbn,
 			sizeof(lbn), (void *)&lbn_fp_value, &vsize);
 	if (r == -ENODATA) {
 		bio_zero_endio(bio);
@@ -135,13 +135,14 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	nvme_pth_kv_cmd.flags = 0;
 	nvme_pth_kv_cmd.rsvd1 = 0;
 	nvme_pth_kv_cmd.nsid = 1;
-	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u32)dc & 0xFFFFFFFF); //dc
-	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u32)dc) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u32)bio & 0xFFFFFFFF); //bio
-	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u32)bio) >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u64)dc & 0xFFFFFFFF); //dc
+	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u64)dc) >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u64)bio & 0xFFFFFFFF); //bio
+	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u64)bio) >> 32) & 0xFFFFFFFF);
 	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
 	nvme_pth_kv_cmd.data_len = 4096; // data_len
 	nvme_pth_kv_cmd.key_len = 16; // key_len
+    memcpy(nvme_pth_kv_cmd.key, lbn_fp_value.fp, 16);
 	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
 
 	// ioctl
@@ -551,16 +552,18 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	if (r)
 		return r;
 
+    dc->kvs_lbn_fp->kvs_insert(dc->kvs_lbn_fp, (void*)&lbn, sizeof(u64), (void*)hash, 16);
+
 	// put(FP, data)
 	op = nvme_cmd_kv_store;
 	nvme_pth_kv_cmd.opcode = op; // opcode
 	nvme_pth_kv_cmd.flags = 0;
 	nvme_pth_kv_cmd.rsvd1 = 0;
 	nvme_pth_kv_cmd.nsid = 1;
-	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u32)dc & 0xFFFFFFFF); //dc
-	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u32)dc) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u32)bio & 0xFFFFFFFF); //bio
-	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u32)bio) >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u64)dc & 0xFFFFFFFF); //dc
+	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u64)dc) >> 32) & 0xFFFFFFFF);
+	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u64)bio & 0xFFFFFFFF); //bio
+	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u64)bio) >> 32) & 0xFFFFFFFF);
 	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
 	nvme_pth_kv_cmd.data_len = 4096; // data_len
 	nvme_pth_kv_cmd.key_len = 16; // key_len
@@ -1144,14 +1147,14 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		r = PTR_ERR(dc->kvs_hash_pbn);
 		goto bad_kvstore_init;
 	}
-
-	dc->kvs_lbn_pbn = dc->mdops->kvs_create_linear(md, 8,
-			sizeof(struct lbn_pbn_value), dc->lblocks, unformatted);
-	if (IS_ERR(dc->kvs_lbn_pbn)) {
-		ti->error = "failed to create linear KVS";
-		r = PTR_ERR(dc->kvs_lbn_pbn);
-		goto bad_kvstore_init;
-	}
+	
+	// dc->kvs_lbn_pbn = dc->mdops->kvs_create_linear(md, 8,
+	// 		sizeof(struct lbn_pbn_value), dc->lblocks, unformatted);
+	// if (IS_ERR(dc->kvs_lbn_pbn)) {
+	// 	ti->error = "failed to create linear KVS";
+	// 	r = PTR_ERR(dc->kvs_lbn_pbn);
+	// 	goto bad_kvstore_init;
+	// }
 
 	// 添加lbn->fp映射表
 	dc->kvs_lbn_fp = dc->mdops->kvs_create_linear(md, 8,
