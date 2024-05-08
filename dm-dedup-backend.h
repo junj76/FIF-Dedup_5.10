@@ -30,9 +30,13 @@ struct metadata_ops {
 	 * Returns ERR_PTR(*) on error.
 	 * Valid pointer on success.
 	 */
-	struct metadata * (*init_meta)(void *init_param, bool *unformatted);
+	struct metadata * (*init_meta)(void *init_param, bool *unformatted, bool isHashTable);
 
 	void (*exit_meta)(struct metadata *md);
+
+	struct kvstore * (*kvs_create_hashtable)(struct metadata *md,
+							u32 ksize, uint32_t vsize,
+							u32 kmax, bool unformatted);
 
 	/*
 	 * Creates linear key-value store. Ksize and vsize in bytes.

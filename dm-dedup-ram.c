@@ -45,7 +45,7 @@ struct kvstore_inram {
 	char *store;
 };
 
-static struct metadata *init_meta_inram(void *init_param, bool *unformatted)
+static struct metadata *init_meta_inram(void *init_param, bool *unformatted, bool isHashTable)
 {
 	u64 smap_size, tmp;
 	struct metadata *md;

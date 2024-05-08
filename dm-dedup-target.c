@@ -115,6 +115,7 @@ __u64 get_data_addr_of_bio(struct bio *bio) {
  */
 static int handle_read(struct dedup_config *dc, struct bio *bio)
 {
+	printk(KERN_INFO "func: handle_read");
 	u64 lbn;
 	u32 vsize;
 	struct lbn_fp_value lbn_fp_value;
@@ -127,8 +128,13 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	r = dc->kvs_lbn_fp->kvs_lookup(dc->kvs_lbn_fp, (void *)&lbn,
 			sizeof(lbn), (void *)&lbn_fp_value, &vsize);
 	if (r == -ENODATA) {
+		printk(KERN_INFO "fail to lookup lbn->fp map");
 		bio_zero_endio(bio);
+		return 0;
 	}
+	printk(KERN_INFO "success to lookup hash table");
+
+	printk(KERN_INFO "begin to prepare nvme_pth_kv_cmd");
 
 	op = nvme_cmd_kv_retrieve;
 	nvme_pth_kv_cmd.opcode = op; // opcode
@@ -144,10 +150,10 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	nvme_pth_kv_cmd.key_len = 16; // key_len
     memcpy(nvme_pth_kv_cmd.key, lbn_fp_value.fp, 16);
 	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
-
-	// ioctl
+	printk(KERN_INFO "success to prepare nvme_pth_kv_cmd");
+	printk(KERN_INFO "handle_read invoke ioctl");
 	bio->bi_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)&nvme_pth_kv_cmd);
-
+	printk(KERN_INFO "complete handle_read");
 	return 0;
 }
 
@@ -520,6 +526,7 @@ static int handle_write_with_hash(struct dedup_config *dc, struct bio *bio,
  */
 static int handle_write(struct dedup_config *dc, struct bio *bio)
 {
+	printk(KERN_INFO "func: handle_write");
 	u64 lbn;
 	u8 hash[MAX_DIGEST_SIZE];
 	struct lbn_fp_value lbn_fp_value;
@@ -1107,6 +1114,9 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	(void)sector_div(data_size, dc->sectors_per_block);
 	dc->pblocks = data_size;
 
+	printk(KERN_INFO "FIF-Dedup: lblocks = %d", dc->lblocks);
+	printk(KERN_INFO "FIF-Dedup: pblocks = %d", dc->pblocks);
+
 	/* Meta-data backend specific part */
 	switch (da.backend) {
 	case BKND_INRAM:
@@ -1123,7 +1133,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	strcpy(dc->backend_str, da.backend_str);
 
-	md = dc->mdops->init_meta(iparam, &unformatted);
+	md = dc->mdops->init_meta(iparam, &unformatted, true);
 	if (IS_ERR(md)) {
 		ti->error = "failed to initialize backend metadata";
 		r = PTR_ERR(md);
@@ -1139,49 +1149,45 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	crypto_key_size = get_hash_digestsize(dc->desc_table);
 
-	dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
-				sizeof(struct hash_pbn_value),
-				dc->pblocks, unformatted);
-	if (IS_ERR(dc->kvs_hash_pbn)) {
-		ti->error = "failed to create sparse KVS";
-		r = PTR_ERR(dc->kvs_hash_pbn);
-		goto bad_kvstore_init;
-	}
-	
-	// dc->kvs_lbn_pbn = dc->mdops->kvs_create_linear(md, 8,
-	// 		sizeof(struct lbn_pbn_value), dc->lblocks, unformatted);
-	// if (IS_ERR(dc->kvs_lbn_pbn)) {
-	// 	ti->error = "failed to create linear KVS";
-	// 	r = PTR_ERR(dc->kvs_lbn_pbn);
+	// dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
+	// 			sizeof(struct hash_pbn_value),
+	// 			dc->pblocks, unformatted);
+	// if (IS_ERR(dc->kvs_hash_pbn)) {
+	// 	ti->error = "failed to create sparse KVS";
+	// 	r = PTR_ERR(dc->kvs_hash_pbn);
 	// 	goto bad_kvstore_init;
 	// }
 
+	printk(KERN_INFO "begin to create hash table");
+
 	// 添加lbn->fp映射表
-	dc->kvs_lbn_fp = dc->mdops->kvs_create_linear(md, 8,
-			sizeof(struct lbn_fp_value), dc->lblocks, unformatted);
+	dc->kvs_lbn_fp = dc->mdops->kvs_create_hashtable(md, 8,
+			sizeof(struct lbn_fp_value), (u32)dc->lblocks, unformatted);
 	if (IS_ERR(dc->kvs_lbn_fp)) {
-		ti->error = "fail to create linear KVS";
+		ti->error = "fail to create hash table";
 		r = PTR_ERR(dc->kvs_lbn_fp);
 		goto bad_kvstore_init;
 	}
 
-	r = dc->mdops->flush_meta(md);
-	if (r < 0) {
-		ti->error = "failed to flush metadata";
-		goto bad_kvstore_init;
-	}
+	printk(KERN_INFO "success to create hash table");
 
-	if (!unformatted && dc->mdops->get_private_data) {
-		r = dc->mdops->get_private_data(md, (void **)&data,
-				sizeof(struct on_disk_stats));
-		if (r < 0) {
-			ti->error = "failed to get private data from superblock";
-			goto bad_kvstore_init;
-		}
+	// r = dc->mdops->flush_meta(md);
+	// if (r < 0) {
+	// 	ti->error = "failed to flush metadata";
+	// 	goto bad_kvstore_init;
+	// }
 
-		logical_block_counter = data->logical_block_counter;
-		physical_block_counter = data->physical_block_counter;
-	}
+	// if (!unformatted && dc->mdops->get_private_data) {
+	// 	r = dc->mdops->get_private_data(md, (void **)&data,
+	// 			sizeof(struct on_disk_stats));
+	// 	if (r < 0) {
+	// 		ti->error = "failed to get private data from superblock";
+	// 		goto bad_kvstore_init;
+	// 	}
+
+	// 	logical_block_counter = data->logical_block_counter;
+	// 	physical_block_counter = data->physical_block_counter;
+	// }
 
 	dc->data_dev = da.data_dev;
 	dc->metadata_dev = da.meta_dev;

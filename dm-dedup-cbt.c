@@ -46,11 +46,19 @@ struct metadata {
 	/*
 	 * XXX: Currently we support only one linear and one sparse KVS.
 	 */
+	struct kvstore_hashtable *kvs_hashtable;
 	struct kvstore_cbt_linear *kvs_linear;
 	struct kvstore_cbt_sparse *kvs_sparse;
 
 	u8 private_data[PRIVATE_DATA_SIZE];
 
+};
+
+struct kvstore_hashtable {
+	struct kvstore ckvs;
+	u32 kmax;
+	u64* table;
+	bool* flag;
 };
 
 struct kvstore_cbt_linear {
@@ -383,8 +391,15 @@ out:
 	return r;
 }
 
-static struct metadata *init_meta_cowbtree(void *input_param, bool *unformatted)
+static struct metadata *init_meta_cowbtree(void *input_param, bool *unformatted, bool isHashTable)
 {
+	if (isHashTable) {
+		struct metadata *md;
+		md = kzalloc(sizeof(*md), GFP_NOIO);
+		if (!md)
+			return ERR_PTR(-ENOMEM);
+		return md;
+	}
 	int ret;
 	struct metadata *md;
 	struct dm_block_manager *meta_bm;
@@ -587,6 +602,123 @@ bool is_deleted_entry(const char *ptr, uint32_t length)
 		i++;
 
 	return i == length;
+}
+
+/*********************************************************
+ *		HashTable KVS Functions			 *
+ *********************************************************/
+
+static int kvs_delete_hashtable(struct kvstore *kvs,
+							void *key, int32_t ksize)
+{
+	printk(KERN_INFO "func: kvs_delete_hashtable");
+	struct kvstore_hashtable *kvhash = NULL;
+
+	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (ksize != kvs->ksize)
+		return -EINVAL;
+	
+	if (kvhash->flag[(*(u32*)key)]) {
+		kvhash->flag[(*(u32*)key)] = 0;
+	}
+
+	return 0;
+}
+
+static int kvs_lookup_hashtable(struct kvstore *kvs, void *key,
+							s32 ksize, void *value, int32_t *vsize)
+{
+	printk(KERN_INFO "func: kvs_lookup_hashtable");
+	struct kvstore_hashtable *kvhash = NULL;
+
+	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (ksize != kvs->ksize) {
+		return -EINVAL;
+	}
+
+	if (!kvhash->flag[(*(u32*)key)]) {
+		return -ENODATA;
+	}
+	else {
+		memcpy(value, &kvhash->table[(*(u32*)key)], kvs->vsize);
+		*vsize = kvs->vsize;
+		return 0;
+	}
+}
+
+static int kvs_insert_hashtable(struct kvstore *kvs, void *key,
+							s32 ksize, void *value,
+							int32_t vsize)
+{
+	printk(KERN_INFO "func: kvs_insert_hashtable");
+	struct kvstore_hashtable *kvhash = NULL;
+
+	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (ksize != kvs->ksize) {
+		return -EINVAL;
+	}
+
+	if (vsize != kvs->vsize) {
+		return -EINVAL;
+	}
+
+	if (*(u32*)key < 0 || *(u32*)key > kvhash->kmax) {
+		return -EINVAL;
+	}
+
+	memcpy(&kvhash->table[(*(u32*)key)], value, vsize);
+
+	kvhash->flag[(*(u32*)key)] = 1;
+
+	return 0;
+
+}
+
+static struct kvstore *kvs_create_hashtable(struct metadata *md,
+						u32 ksize, uint32_t vsize,
+						u32 kmax, bool unformatted)
+{
+	printk(KERN_INFO "func: kvs_create hashtable");
+	int i = 0;
+	struct kvstore_hashtable *kvs;
+	
+	kvs = kmalloc(sizeof(*kvs), GFP_NOIO);
+	if (!kvs) 
+		return ERR_PTR(-ENOMEM);
+
+	kvs->ckvs.ksize = ksize;
+	kvs->ckvs.vsize = vsize;
+	kvs->kmax = kmax;
+
+	kvs->table = (u64*)vmalloc(kmax * sizeof(u64));
+	if (!kvs->table) {
+		printk(KERN_EMERG "fail to alloc table");
+		return ERR_PTR(-ENOMEM);
+	}
+	printk(KERN_INFO "success to alloc table");
+
+	kvs->flag = (bool*)vmalloc(kmax);
+	if (!kvs->flag) {
+		printk(KERN_EMERG "fail to alloc flag");
+		return ERR_PTR(-ENOMEM);
+	}
+	printk(KERN_INFO "success to alloc flag");
+
+	for (i = 0; i < kmax; i++) {
+		kvs->flag[i] = 0;
+	}
+
+	kvs->ckvs.kvs_insert = kvs_insert_hashtable;
+	kvs->ckvs.kvs_lookup = kvs_lookup_hashtable;
+	kvs->ckvs.kvs_delete = kvs_delete_hashtable;
+	kvs->ckvs.kvs_iterate = NULL;
+
+	md->kvs_hashtable = kvs;
+
+	return &(kvs->ckvs);
 }
 
 /*********************************************************
@@ -1107,6 +1239,7 @@ int set_private_data_cowbtree(struct metadata *md, void *data, uint32_t size)
 struct metadata_ops metadata_ops_cowbtree = {
 	.init_meta = init_meta_cowbtree,
 	.exit_meta = exit_meta_cowbtree,
+	.kvs_create_hashtable = kvs_create_hashtable,
 	.kvs_create_linear = kvs_create_linear_cowbtree,
 	.kvs_create_sparse = kvs_create_sparse_cowbtree,
 
