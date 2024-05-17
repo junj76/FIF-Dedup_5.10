@@ -611,10 +611,14 @@ bool is_deleted_entry(const char *ptr, uint32_t length)
 static int kvs_delete_hashtable(struct kvstore *kvs,
 							void *key, int32_t ksize)
 {
-	printk(KERN_INFO "func: kvs_delete_hashtable");
 	struct kvstore_hashtable *kvhash = NULL;
 
 	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (!kvhash) {
+		printk(KERN_INFO "fail to find kvhash");
+		return -EINVAL;
+	}
 
 	if (ksize != kvs->ksize)
 		return -EINVAL;
@@ -629,10 +633,14 @@ static int kvs_delete_hashtable(struct kvstore *kvs,
 static int kvs_lookup_hashtable(struct kvstore *kvs, void *key,
 							s32 ksize, void *value, int32_t *vsize)
 {
-	printk(KERN_INFO "func: kvs_lookup_hashtable");
 	struct kvstore_hashtable *kvhash = NULL;
 
 	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (!kvhash) {
+		printk(KERN_INFO "fail to find kvhash");
+		return -EINVAL;
+	}
 
 	if (ksize != kvs->ksize) {
 		return -EINVAL;
@@ -642,7 +650,7 @@ static int kvs_lookup_hashtable(struct kvstore *kvs, void *key,
 		return -ENODATA;
 	}
 	else {
-		memcpy(value, &kvhash->table[(*(u32*)key)], kvs->vsize);
+		memcpy(value, &kvhash->table[(*(u32*)key) * 8], kvs->vsize);
 		*vsize = kvs->vsize;
 		return 0;
 	}
@@ -652,10 +660,14 @@ static int kvs_insert_hashtable(struct kvstore *kvs, void *key,
 							s32 ksize, void *value,
 							int32_t vsize)
 {
-	printk(KERN_INFO "func: kvs_insert_hashtable");
 	struct kvstore_hashtable *kvhash = NULL;
 
 	kvhash = container_of(kvs, struct kvstore_hashtable, ckvs);
+
+	if (!kvhash) {
+		printk(KERN_INFO "fail to find kvhash");
+		return -EINVAL;
+	}
 
 	if (ksize != kvs->ksize) {
 		return -EINVAL;
@@ -665,11 +677,11 @@ static int kvs_insert_hashtable(struct kvstore *kvs, void *key,
 		return -EINVAL;
 	}
 
-	if (*(u32*)key < 0 || *(u32*)key > kvhash->kmax) {
+	if (*(u32*)key > kvhash->kmax) {
 		return -EINVAL;
 	}
 
-	memcpy(&kvhash->table[(*(u32*)key)], value, vsize);
+	memcpy(&kvhash->table[(*(u32*)key) * 8], value, vsize);
 
 	kvhash->flag[(*(u32*)key)] = 1;
 
@@ -681,7 +693,6 @@ static struct kvstore *kvs_create_hashtable(struct metadata *md,
 						u32 ksize, uint32_t vsize,
 						u32 kmax, bool unformatted)
 {
-	printk(KERN_INFO "func: kvs_create hashtable");
 	int i = 0;
 	struct kvstore_hashtable *kvs;
 	
@@ -693,19 +704,17 @@ static struct kvstore *kvs_create_hashtable(struct metadata *md,
 	kvs->ckvs.vsize = vsize;
 	kvs->kmax = kmax;
 
-	kvs->table = (u64*)vmalloc(kmax * sizeof(u64));
+	kvs->table = (u64*)vmalloc(kmax * sizeof(u64) + 10);
 	if (!kvs->table) {
 		printk(KERN_EMERG "fail to alloc table");
 		return ERR_PTR(-ENOMEM);
 	}
-	printk(KERN_INFO "success to alloc table");
 
-	kvs->flag = (bool*)vmalloc(kmax);
+	kvs->flag = (bool*)vmalloc(kmax+10);
 	if (!kvs->flag) {
 		printk(KERN_EMERG "fail to alloc flag");
 		return ERR_PTR(-ENOMEM);
 	}
-	printk(KERN_INFO "success to alloc flag");
 
 	for (i = 0; i < kmax; i++) {
 		kvs->flag[i] = 0;

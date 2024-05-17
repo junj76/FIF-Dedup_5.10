@@ -17,6 +17,9 @@
 
 #include <linux/vmalloc.h>
 #include <linux/kdev_t.h>
+#include <linux/fs.h>
+#include <linux/nvme.h>
+#include <linux/blkdev.h>
 
 #include "dm-dedup-target.h"
 #include "dm-dedup-rw.h"
@@ -54,6 +57,22 @@ enum backend {
 	BKND_INRAM,
 	BKND_COWBTREE
 };
+
+unsigned long get_total_logical_blocks(struct block_device *bdev) {
+    unsigned long total_blocks;
+    unsigned block_size;
+
+    // 获取设备的块大小
+    block_size = block_size(bdev);
+
+    // 获取总的字节数
+    loff_t total_size = i_size_read(bdev->bd_inode);
+
+    // 计算总的逻辑块数
+    total_blocks = total_size / block_size;
+
+    return total_blocks;
+}
 
 /* Initializes bio. */
 static void bio_zero_endio(struct bio *bio)
@@ -115,13 +134,14 @@ __u64 get_data_addr_of_bio(struct bio *bio) {
  */
 static int handle_read(struct dedup_config *dc, struct bio *bio)
 {
-	printk(KERN_INFO "func: handle_read");
 	u64 lbn;
 	u32 vsize;
 	struct lbn_fp_value lbn_fp_value;
-	struct nvme_passthru_kv_cmd nvme_pth_kv_cmd;
-	enum nvme_opcode op;
+	struct nvme_passthru_kv_cmd *nvme_pth_kv_cmd;
+	enum nvme_kv_opcode op;
 	int r;
+
+	nvme_pth_kv_cmd = kmalloc(sizeof(struct nvme_passthru_kv_cmd), GFP_NOIO);
 
 	lbn = bio_lbn(dc, bio);
 
@@ -132,29 +152,37 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 		bio_zero_endio(bio);
 		return 0;
 	}
-	printk(KERN_INFO "success to lookup hash table");
+	else if (r == -EINVAL) {
+		printk(KERN_INFO "lookup error: -EINVAL");
+		return r;
+	}
+	else if (r == 0) {
+		op = nvme_cmd_kv_retrieve;
+		nvme_pth_kv_cmd->opcode = op; // opcode
+		nvme_pth_kv_cmd->flags = 0;
+		nvme_pth_kv_cmd->rsvd1 = 0;
+		nvme_pth_kv_cmd->nsid = 1;
+		nvme_pth_kv_cmd->data_addr = get_data_addr_of_bio(bio); // data_addr
+		nvme_pth_kv_cmd->data_len = 4096; // data_len
+		nvme_pth_kv_cmd->key_len = 16; // key_len
+		memcpy(nvme_pth_kv_cmd->key, lbn_fp_value.fp, 16);
+		nvme_pth_kv_cmd->timeout_ms = 1000; //timeout_ms
+		
+		r = dc->data_dev->bdev->bd_disk->fops->ioctl(dc->data_dev->bdev, FMODE_READ, NVME_IOCTL_IO_KV_CMD, (unsigned long)nvme_pth_kv_cmd);
 
-	printk(KERN_INFO "begin to prepare nvme_pth_kv_cmd");
-
-	op = nvme_cmd_kv_retrieve;
-	nvme_pth_kv_cmd.opcode = op; // opcode
-	nvme_pth_kv_cmd.flags = 0;
-	nvme_pth_kv_cmd.rsvd1 = 0;
-	nvme_pth_kv_cmd.nsid = 1;
-	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u64)dc & 0xFFFFFFFF); //dc
-	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u64)dc) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u64)bio & 0xFFFFFFFF); //bio
-	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u64)bio) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
-	nvme_pth_kv_cmd.data_len = 4096; // data_len
-	nvme_pth_kv_cmd.key_len = 16; // key_len
-    memcpy(nvme_pth_kv_cmd.key, lbn_fp_value.fp, 16);
-	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
-	printk(KERN_INFO "success to prepare nvme_pth_kv_cmd");
-	printk(KERN_INFO "handle_read invoke ioctl");
-	bio->bi_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)&nvme_pth_kv_cmd);
-	printk(KERN_INFO "complete handle_read");
-	return 0;
+		if (r < 0) {
+			printk(KERN_INFO "fail to send ioctl");
+			bio_zero_endio(bio);
+			return 0;
+		}
+		printk(KERN_INFO "complete handle_read");
+		kfree(nvme_pth_kv_cmd);
+		bio_zero_endio(bio);
+		return 0;
+	}
+	else {
+		return 0;
+	}
 }
 
 /*
@@ -532,9 +560,11 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	struct lbn_fp_value lbn_fp_value;
 	u32 vsize;
 	struct bio *new_bio = NULL;
-	struct nvme_passthru_kv_cmd nvme_pth_kv_cmd;
-	enum nvme_opcode op;
+	struct nvme_passthru_kv_cmd *nvme_pth_kv_cmd;
+	enum nvme_kv_opcode op;
 	int r;
+
+	nvme_pth_kv_cmd = kmalloc(sizeof(struct nvme_passthru_kv_cmd), GFP_NOIO);
 
 	/* If there is a data corruption make the device read-only */
 	if (dc->corrupted_blocks > dc->fec_fixed)
@@ -563,31 +593,28 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 
 	// put(FP, data)
 	op = nvme_cmd_kv_store;
-	nvme_pth_kv_cmd.opcode = op; // opcode
-	nvme_pth_kv_cmd.flags = 0;
-	nvme_pth_kv_cmd.rsvd1 = 0;
-	nvme_pth_kv_cmd.nsid = 1;
-	nvme_pth_kv_cmd.cdw2 = (__u32) ((__u64)dc & 0xFFFFFFFF); //dc
-	nvme_pth_kv_cmd.cdw3 = (__u32) ((__u32)(((__u64)dc) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.cdw4 = (__u32) ((__u64)bio & 0xFFFFFFFF); //bio
-	nvme_pth_kv_cmd.cdw5 = (__u32) ((__u32)(((__u64)bio) >> 32) & 0xFFFFFFFF);
-	nvme_pth_kv_cmd.data_addr = get_data_addr_of_bio(bio); // data_addr
-	nvme_pth_kv_cmd.data_len = 4096; // data_len
-	nvme_pth_kv_cmd.key_len = 16; // key_len
-	memcpy(nvme_pth_kv_cmd.key, hash, 16); // key
-	nvme_pth_kv_cmd.timeout_ms = 1000; //timeout_ms
+	nvme_pth_kv_cmd->opcode = op; // opcode
+	nvme_pth_kv_cmd->flags = 0;
+	nvme_pth_kv_cmd->rsvd1 = 0;
+	nvme_pth_kv_cmd->nsid = 1;
+	nvme_pth_kv_cmd->data_addr = get_data_addr_of_bio(bio); // data_addr
+	nvme_pth_kv_cmd->data_len = 4096; // data_len
+	nvme_pth_kv_cmd->key_len = 16; // key_len
+	memcpy(nvme_pth_kv_cmd->key, hash, 16); // key
+	nvme_pth_kv_cmd->timeout_ms = 1000; //timeout_ms
 
 	// ioctl
-	bio->bi_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)&nvme_pth_kv_cmd);
+	printk(KERN_INFO "NVME_IOCTL_IO_KV_CMD=%u", NVME_IOCTL_IO_KV_CMD);
+	r = dc->data_dev->bdev->bd_disk->fops->ioctl(dc->data_dev->bdev, 0, NVME_IOCTL_IO_KV_CMD, (unsigned long)nvme_pth_kv_cmd);
 
-	dc->writes_after_flush++;
-	if ((dc->flushrq && dc->writes_after_flush >= dc->flushrq) ||
-	    (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))) {
-		r = dc->mdops->flush_meta(dc->bmd);
-		if (r < 0)
-			return r;
-		dc->writes_after_flush = 0;
+	if (r < 0) {
+		printk(KERN_INFO "fail to send ioctl, r = %d", r);
+		bio_zero_endio(bio);
+		return 0;
 	}
+
+	kfree(nvme_pth_kv_cmd);
+	bio_zero_endio(bio);
 
 	return 0;
 }
@@ -681,15 +708,16 @@ out:
  */
 static void process_bio(struct dedup_config *dc, struct bio *bio)
 {
+	// printk(KERN_INFO "func: process bio");
 	int r;
 
-	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
-		r = dc->mdops->flush_meta(dc->bmd);
-		if (r == 0)
-			dc->writes_after_flush = 0;
-		do_io_remap_device(dc, bio);
-		return;
-	}
+	// if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
+	// 	r = dc->mdops->flush_meta(dc->bmd);
+	// 	if (r == 0)
+	// 		dc->writes_after_flush = 0;
+	// 	do_io_remap_device(dc, bio);
+	// 	return;
+	// }
 	if (bio_op(bio) == REQ_OP_DISCARD) {
 		r = handle_discard(dc, bio);
 		return;
@@ -1149,17 +1177,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	crypto_key_size = get_hash_digestsize(dc->desc_table);
 
-	// dc->kvs_hash_pbn = dc->mdops->kvs_create_sparse(md, crypto_key_size,
-	// 			sizeof(struct hash_pbn_value),
-	// 			dc->pblocks, unformatted);
-	// if (IS_ERR(dc->kvs_hash_pbn)) {
-	// 	ti->error = "failed to create sparse KVS";
-	// 	r = PTR_ERR(dc->kvs_hash_pbn);
-	// 	goto bad_kvstore_init;
-	// }
-
-	printk(KERN_INFO "begin to create hash table");
-
 	// 添加lbn->fp映射表
 	dc->kvs_lbn_fp = dc->mdops->kvs_create_hashtable(md, 8,
 			sizeof(struct lbn_fp_value), (u32)dc->lblocks, unformatted);
@@ -1267,16 +1284,16 @@ static void dm_dedup_dtr(struct dm_target *ti)
 			DMERR("Failed to set the private data in superblock.");
 	}
 
-	ret = dc->mdops->flush_meta(dc->bmd);
-	if (ret < 0)
-		DMERR("Failed to flush the metadata to disk.");
+	// ret = dc->mdops->flush_meta(dc->bmd);
+	// if (ret < 0)
+	// 	DMERR("Failed to flush the metadata to disk.");
 
 	flush_workqueue(dc->workqueue);
 	destroy_workqueue(dc->workqueue);
 
 	mempool_destroy(dc->dedup_work_pool);
 
-	dc->mdops->exit_meta(dc->bmd);
+	// dc->mdops->exit_meta(dc->bmd);
 
 	dm_io_client_destroy(dc->io_client);
 

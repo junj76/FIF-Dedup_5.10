@@ -37,7 +37,7 @@ struct nvme_passthru_kv_cmd {
 
 #define NVME_IOCTL_IO_KV_CMD    _IOWR('N', 0x51, struct nvme_passthru_kv_cmd)
 
-enum nvme_opcode {
+enum nvme_kv_opcode {
 	nvme_cmd_kv_store = 0x81,
 	nvme_cmd_kv_append = 0x83,
 	nvme_cmd_kv_retrieve = 0x90,
