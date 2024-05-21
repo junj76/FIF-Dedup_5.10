@@ -60,6 +60,8 @@ struct dedup_config {
 	u32 block_size;	/* in bytes */
 	u32 sectors_per_block;
 
+	u32 metadata_dev_lblocks; /* metadata dev logical blocks */
+
 	u32 pblocks;	/* physical blocks */
 	u32 lblocks;	/* logical blocks */
 

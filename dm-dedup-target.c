@@ -62,8 +62,9 @@ unsigned long get_total_logical_blocks(struct block_device *bdev) {
     unsigned long total_blocks;
     unsigned block_size;
 
-    // 获取设备的块大小
-    block_size = block_size(bdev);
+    // 获取设备的逻辑块大小
+    // block_size = bdev_logical_block_size(bdev);
+	block_size = 4096;
 
     // 获取总的字节数
     loff_t total_size = i_size_read(bdev->bd_inode);
@@ -148,12 +149,10 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	r = dc->kvs_lbn_fp->kvs_lookup(dc->kvs_lbn_fp, (void *)&lbn,
 			sizeof(lbn), (void *)&lbn_fp_value, &vsize);
 	if (r == -ENODATA) {
-		printk(KERN_INFO "fail to lookup lbn->fp map");
 		bio_zero_endio(bio);
 		return 0;
 	}
 	else if (r == -EINVAL) {
-		printk(KERN_INFO "lookup error: -EINVAL");
 		return r;
 	}
 	else if (r == 0) {
@@ -175,7 +174,6 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 			bio_zero_endio(bio);
 			return 0;
 		}
-		printk(KERN_INFO "complete handle_read");
 		kfree(nvme_pth_kv_cmd);
 		bio_zero_endio(bio);
 		return 0;
@@ -1188,26 +1186,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	printk(KERN_INFO "success to create hash table");
 
-	// r = dc->mdops->flush_meta(md);
-	// if (r < 0) {
-	// 	ti->error = "failed to flush metadata";
-	// 	goto bad_kvstore_init;
-	// }
-
-	// if (!unformatted && dc->mdops->get_private_data) {
-	// 	r = dc->mdops->get_private_data(md, (void **)&data,
-	// 			sizeof(struct on_disk_stats));
-	// 	if (r < 0) {
-	// 		ti->error = "failed to get private data from superblock";
-	// 		goto bad_kvstore_init;
-	// 	}
-
-	// 	logical_block_counter = data->logical_block_counter;
-	// 	physical_block_counter = data->physical_block_counter;
-	// }
-
 	dc->data_dev = da.data_dev;
 	dc->metadata_dev = da.meta_dev;
+
+	dc->metadata_dev_lblocks = get_total_logical_blocks(dc->metadata_dev->bdev);
+
+	printk(KERN_INFO "FIF-Dedup: metadata dev lblocks = %d", dc->metadata_dev_lblocks);
 
 	dc->workqueue = wq;
 	dc->dedup_work_pool = dedup_work_pool;
