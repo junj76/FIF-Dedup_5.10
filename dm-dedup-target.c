@@ -58,22 +58,6 @@ enum backend {
 	BKND_COWBTREE
 };
 
-unsigned long get_total_logical_blocks(struct block_device *bdev) {
-    unsigned long total_blocks;
-    unsigned block_size;
-
-    // 获取设备的块大小
-    block_size = block_size(bdev);
-
-    // 获取总的字节数
-    loff_t total_size = i_size_read(bdev->bd_inode);
-
-    // 计算总的逻辑块数
-    total_blocks = total_size / block_size;
-
-    return total_blocks;
-}
-
 /* Initializes bio. */
 static void bio_zero_endio(struct bio *bio)
 {
