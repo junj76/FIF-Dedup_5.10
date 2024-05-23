@@ -20,6 +20,8 @@
 #include <linux/fs.h>
 #include <linux/nvme.h>
 #include <linux/blkdev.h>
+#include <linux/bio.h>
+#include <slab.h>
 
 #include "dm-dedup-target.h"
 #include "dm-dedup-rw.h"
@@ -73,6 +75,56 @@ unsigned long get_total_logical_blocks(struct block_device *bdev) {
     total_blocks = total_size / block_size;
 
     return total_blocks;
+}
+
+int write_to_lba(struct block_device *bdev, sector_t lba, void *buffer) {
+    struct bio *bio;
+    struct page *page;
+    void *page_buffer;
+    int ret;
+
+    // 分配一个页对齐的内存页
+    page = alloc_page(GFP_KERNEL);
+    if (!page) {
+        return -ENOMEM;
+    }
+
+    // 将数据从原始 buffer 复制到页对齐的内存页
+    page_buffer = page_address(page);
+    memcpy(page_buffer, buffer, 4096);
+
+    bio = bio_alloc(GFP_KERNEL, 1);  // 需要一个 bio_vec
+    if (!bio) {
+        __free_page(page);
+        return -ENOMEM;
+    }
+
+    // 设置 BIO 参数
+    bio_set_dev(bio, bdev);
+    bio->bi_iter.bi_sector = lba;
+    bio->bi_opf = REQ_OP_WRITE | REQ_SYNC;
+
+    if (bio_add_page(bio, page, 4096, 0) < 4096) {
+        bio_put(bio);
+        __free_page(page);
+        return -EIO;
+    }
+
+    ret = submit_bio_wait(bio);  // 同步等待 bio 完成
+    bio_put(bio);
+    __free_page(page);
+
+    return ret;
+}
+
+static void check_and_flush_metadata_log(struct dedup_config *dc) {
+	// 检查日志是否记满，如果已满则下刷日志
+	if (dc->bmd->kvs_hashtable->log.header.count = 204) {
+		// 下刷并重置日志结果
+	}
+	else {
+		return;
+	}
 }
 
 /* Initializes bio. */

@@ -54,11 +54,41 @@ struct metadata {
 
 };
 
+typedef enum {
+	INSERT,
+	DELETE,
+} operation_type_t;
+
+struct metadata_log_header {
+	u32 sequence_number;
+	u32 count;
+	u32 data1;
+	u32 data2;
+}; // 16B
+
+struct metadata_log_entry
+{
+	operation_type_t operation_type;
+	u64 location;
+	u8 data[8];
+}; // 20B
+
+
+struct metadata_log
+{
+	struct metadata_log_header header;
+	struct metadata_log_entry entrys[204]; // (4096 - 16) / 20 = 204
+};
+
+
 struct kvstore_hashtable {
 	struct kvstore ckvs;
 	u32 kmax;
 	u64* table;
 	bool* flag;
+	bool* isdirty;
+	struct metadata_log log;
+	u32 sequence_number;
 };
 
 struct kvstore_cbt_linear {
@@ -627,6 +657,13 @@ static int kvs_delete_hashtable(struct kvstore *kvs,
 		kvhash->flag[(*(u32*)key)] = 0;
 	}
 
+	kvhash->isdirty[(*(u32*)key)] = 1;
+
+	// write log
+	kvhash->log.entrys[kvhash->matadata_log.header.count].operation_type = INSERT;
+	kvhash->log.entrys[kvhash->matadata_log.header.count].location = *(u32*)key;
+	kvhash->log.header.count++;
+
 	return 0;
 }
 
@@ -685,6 +722,14 @@ static int kvs_insert_hashtable(struct kvstore *kvs, void *key,
 
 	kvhash->flag[(*(u32*)key)] = 1;
 
+	kvhash->isdirty[*(u32*)key] = 1;
+
+	// write log
+	kvhash->log.entrys[kvhash->matadata_log.header.count].operation_type = INSERT;
+	kvhash->log.entrys[kvhash->matadata_log.header.count].location = *(u32*)key;
+	memcpy(kvhash->log.entrys[kvhash->matadata_log.header.count].data, value, vsize);
+	kvhash->log.header.count++;
+
 	return 0;
 
 }
@@ -719,6 +764,20 @@ static struct kvstore *kvs_create_hashtable(struct metadata *md,
 	for (i = 0; i < kmax; i++) {
 		kvs->flag[i] = 0;
 	}
+
+	kvs->isdirty = (bool*)vmalloc(kmax+10);
+	if (!kvs->isdirty) {
+		printk(KERN_EMERG "fail to alloc isdirty");
+		return ERR_PTR(-ENOMEM);
+	}
+
+	for (i = 0; i < kmax; i++) {
+		kvs->isdirty[i] = 0;
+	}
+
+	kvs->sequence_number = 0;
+	kvs->log.header.sequence_number = 0;
+	kvs->log.header.count = 0;
 
 	kvs->ckvs.kvs_insert = kvs_insert_hashtable;
 	kvs->ckvs.kvs_lookup = kvs_lookup_hashtable;
